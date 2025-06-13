@@ -74,6 +74,9 @@ import com.dessalines.thumbkey.utils.slideCursorDistance
 import com.dessalines.thumbkey.utils.startSelection
 import com.dessalines.thumbkey.utils.swipeDirection
 import com.dessalines.thumbkey.utils.toPx
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -123,6 +126,7 @@ fun KeyboardKey(
     onSwitchLanguage: () -> Unit,
     onChangePosition: ((old: KeyboardPosition) -> KeyboardPosition) -> Unit,
     onKeyEvent: () -> Unit,
+    onHold: () -> Unit = {}, // Default value provided here.
     oppositeCaseKey: KeyItemC? = null,
     numericKey: KeyItemC? = null,
     dragReturnEnabled: Boolean,
@@ -130,6 +134,27 @@ fun KeyboardKey(
     clockwiseDragAction: CircularDragAction,
     counterclockwiseDragAction: CircularDragAction,
 ) {
+    // We'll use the "center" key from KeyItemC when rendering or printing debug info.
+    // Since KeyItemC does not have a direct `label` field, we extract it from key.center.display.
+    fun keyLabel(): String =
+        when (val display = key.center.display) {
+            is KeyDisplay.TextDisplay -> display.text
+            is KeyDisplay.IconDisplay -> "Icon" // Customize this if you want a better representation.
+            else -> ""
+        }
+	
+    // Record the initial position of the press.
+    var initialPressPosition by remember { mutableStateOf(Offset.Zero) }
+    // A job to track the hold timer.
+    var holdJob by remember { mutableStateOf<Job?>(null) }
+    // Duration, in milliseconds, needed to register a hold.
+    val holdTimeout = 600L
+    // Allowed movement threshold in pixels before resetting the timer.
+    val dragThresholdPx = 20f
+
+    // Capture the callbacks to use them inside non-suspend lambdas.
+    val holdAction = onHold
+
     // Necessary for swipe settings to get updated correctly
     val id =
         key.toString() + ghostKey.toString() + animationHelperSpeed + animationSpeed + autoCapitalize +
@@ -277,11 +302,36 @@ fun KeyboardKey(
             // The key1 is necessary, otherwise new swipes wont work
             .pointerInput(key1 = id) {
                 detectDragGestures(
-                    onDragStart = {
+                    onDragStart = { offset ->
+                        // Record the initial position and start the hold timer.
+                        initialPressPosition = offset
+                        holdJob =
+                            scope.launch {
+                                delay(holdTimeout)
+                                println("DEBUG: Hold triggered after drag reset for key '${keyLabel()}' at position $initialPressPosition")
+                                holdAction()
+                            }
+
                         isDragged.value = true
                     },
                     onDrag = { change, dragAmount ->
                         change.consume()
+
+                        val currentPos = change.position
+                        // If the movement from the initial point exceeds the threshold, reset the timer.
+                        if ((currentPos - initialPressPosition).getDistance() > dragThresholdPx) {
+                            holdJob?.cancel()
+                            initialPressPosition = currentPos
+                            holdJob =
+                                scope.launch {
+                                    delay(holdTimeout)
+                                    println(
+                                        "DEBUG: Hold triggered after drag reset for key '${keyLabel()}' at position $initialPressPosition",
+                                    )
+                                    holdAction()
+                                }
+                        }
+
                         val (x, y) = dragAmount
                         offsetX += x
                         offsetY += y
@@ -439,6 +489,10 @@ fun KeyboardKey(
                         }
                     },
                     onDragEnd = {
+                        // Cancel the timer and trigger click when the drag ends.
+                        holdJob?.cancel()
+                        holdJob = null
+
                         lateinit var action: KeyAction
 
                         if (key.slideType == SlideType.NONE ||
@@ -612,6 +666,11 @@ fun KeyboardKey(
 
                         // Reset selection
                         selection = Selection()
+                    },
+                    onDragCancel = {
+                        // Cancel the timer if the gesture is cancelled.
+                        holdJob?.cancel()
+                        holdJob = null
                     },
                 )
             }
